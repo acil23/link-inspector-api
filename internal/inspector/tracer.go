@@ -10,30 +10,28 @@ import (
 	"time"
 )
 
-// Hop merepresentasikan satu langkah lompatan redirect URL
 type Hop struct {
 	Step       int    `json:"step"`
 	URL        string `json:"url"`
 	StatusCode int    `json:"status_code"`
 }
 
-// TraceResult adalah struktur JSON utama yang dikembalikan ke pembeli API
 type TraceResult struct {
-	OriginalURL   string   `json:"original_url"`
-	FinalURL      string   `json:"final_url"`
-	FinalDomain   string   `json:"final_domain"`
-	IsShortened   bool     `json:"is_shortened"`
-	TotalHops     int      `json:"total_hops"`
-	RedirectChain []Hop    `json:"redirect_chain"`
-	IsHTTPS       bool     `json:"is_https"`
-	Suspicious    bool     `json:"suspicious"`
-	RiskReasons   []string `json:"risk_reasons,omitempty"`
-	TotalTimeMs   int64    `json:"total_time_ms"`
+	OriginalURL   string       `json:"original_url"`
+	FinalURL      string       `json:"final_url"`
+	FinalDomain   string       `json:"final_domain"`
+	IsShortened   bool         `json:"is_shortened"`
+	TotalHops     int          `json:"total_hops"`
+	RedirectChain []Hop        `json:"redirect_chain"`
+	IsHTTPS       bool         `json:"is_https"`
+	ContentType   string       `json:"content_type,omitempty"`
+	Metadata      PageMetadata `json:"metadata"`
+	Suspicious    bool         `json:"suspicious"`
+	RiskReasons   []string     `json:"risk_reasons,omitempty"`
+	TotalTimeMs   int64        `json:"total_time_ms"`
 }
 
-// isSafeHost mencegah serangan SSRF (melarang akses ke localhost atau IP internal AWS)
 func isSafeHost(host string) error {
-	// Buang port jika ada (misal example.com:8080 -> example.com)
 	hostname := host
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		hostname = h
@@ -56,11 +54,9 @@ func isSafeHost(host string) error {
 	return nil
 }
 
-// Trace menelusuri lompatan URL dari awal sampai akhir
 func Trace(rawURL string) (TraceResult, error) {
 	start := time.Now()
 
-	// Rapikan input URL; tambahkan https:// jika user lupa mengetik skema
 	target := strings.TrimSpace(rawURL)
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
 		target = "https://" + target
@@ -71,7 +67,6 @@ func Trace(rawURL string) (TraceResult, error) {
 		return TraceResult{}, errors.New("format URL tidak valid")
 	}
 
-	// Cek keamanan SSRF pada URL awal
 	if err := isSafeHost(parsedURL.Host); err != nil {
 		return TraceResult{}, err
 	}
@@ -79,11 +74,9 @@ func Trace(rawURL string) (TraceResult, error) {
 	var chain []Hop
 	maxRedirects := 10
 
-	// Buat Custom HTTP Client dengan interceptor CheckRedirect
 	client := &http.Client{
 		Timeout: 8 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Catat setiap lompatan sebelumnya beserta status kodenya (301, 302, 307, dll.)
 			if req.Response != nil && len(via) > 0 {
 				prevReq := via[len(via)-1]
 				chain = append(chain, Hop{
@@ -93,7 +86,6 @@ func Trace(rawURL string) (TraceResult, error) {
 				})
 			}
 
-			// Cek keamanan SSRF di setiap lompatan redirect baru!
 			if err := isSafeHost(req.URL.Host); err != nil {
 				return err
 			}
@@ -105,12 +97,12 @@ func Trace(rawURL string) (TraceResult, error) {
 		},
 	}
 
-	// Buat request dengan User-Agent menyerupai browser asli agar tidak diblokir shortener
 	req, err := http.NewRequest("GET", target, nil)
 	if err != nil {
 		return TraceResult{}, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; LinkGuardBot/1.0; +https://aklein.tech)")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -118,7 +110,6 @@ func Trace(rawURL string) (TraceResult, error) {
 	}
 	defer resp.Body.Close()
 
-	// Tambahkan tujuan akhir sebagai pemberhentian terakhir di rantai lompatan
 	finalURL := resp.Request.URL.String()
 	finalDomain := strings.ToLower(resp.Request.URL.Hostname())
 
@@ -128,7 +119,14 @@ func Trace(rawURL string) (TraceResult, error) {
 		StatusCode: resp.StatusCode,
 	})
 
-	// Analisis Risiko Keamanan Link (Suspicious Check)
+	// Ekstrak Metadata jika halaman tujuan berupa HTML
+	contentType := resp.Header.Get("Content-Type")
+	var meta PageMetadata
+	if strings.Contains(strings.ToLower(contentType), "text/html") {
+		meta = extractMetadata(resp.Body)
+	}
+
+	// Analisis Risiko Keamanan Link
 	var reasons []string
 	isHTTPS := resp.Request.URL.Scheme == "https"
 	if !isHTTPS {
@@ -137,7 +135,6 @@ func Trace(rawURL string) (TraceResult, error) {
 	if len(chain)-1 >= 4 {
 		reasons = append(reasons, "Excessive redirect hops detected (4+ redirects)")
 	}
-	// Deteksi domain yang memakai alamat IP mentah (sering dipakai link phishing)
 	if net.ParseIP(finalDomain) != nil {
 		reasons = append(reasons, "Final URL uses a raw IP address instead of a domain name")
 	}
@@ -150,6 +147,8 @@ func Trace(rawURL string) (TraceResult, error) {
 		TotalHops:     len(chain) - 1,
 		RedirectChain: chain,
 		IsHTTPS:       isHTTPS,
+		ContentType:   contentType,
+		Metadata:      meta,
 		Suspicious:    len(reasons) > 0,
 		RiskReasons:   reasons,
 		TotalTimeMs:   time.Since(start).Milliseconds(),
