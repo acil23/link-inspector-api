@@ -1,0 +1,4 @@
+link-inspector
+link-inspector-api
+*.exe
+.env
