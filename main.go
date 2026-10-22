@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"time"
 
 	// Sesuaikan dengan nama module di go.mod kamu!
 	"github.com/acil23/link-inspector-api/internal/inspector"
+	"github.com/acil23/link-inspector-api/internal/middleware"
 )
 
 func inspectHandler(w http.ResponseWriter, r *http.Request) {
@@ -35,11 +38,27 @@ func inspectHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"service":   "link-inspector-api",
+		"status":    "healthy",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
 func main() {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", healthHandler)
 	mux.HandleFunc("GET /v1/inspect", inspectHandler)
 
-	port := ":8081"
-	fmt.Printf("🔍 Link Inspector API menyala di http://localhost%s\n", port)
-	log.Fatal(http.ListenAndServe(port, mux))
+	securedMux := middleware.RapidAPIAuth(mux)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8081"
+	}
+
+	fmt.Printf("🔍 Link Inspector API menyala di http://localhost:%s\n", port)
+	log.Fatal(http.ListenAndServe(":"+port, securedMux))
 }
